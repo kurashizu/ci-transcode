@@ -235,6 +235,8 @@ export class JobRegistry {
     if (typeof body.resultBytes === "number") job.resultBytes = body.resultBytes;
     await this.touchLru(job.jobId);
 
+    let promotedJobId: string | null = null;
+
     if (body.status === "done" || body.status === "failed") {
       const active = await this.getActiveCount();
       await this.setActiveCount(Math.max(0, active - 1));
@@ -247,11 +249,16 @@ export class JobRegistry {
         await this.reserveQuota(body.resultBytes);
       }
 
-      await this.promoteNextQueued();
+      const promoted = await this.promoteNextQueued();
+      promotedJobId = promoted?.jobId ?? null;
     }
 
     await this.putJobRaw(job);
-    return respond({ ok: true });
+    // The DO never makes outbound HTTP calls to GitHub itself (that stays in the Worker, same
+    // as the initial commit flow) -- so if a queued job was just promoted to "dispatching" here,
+    // the caller (Worker) MUST actually fire the GitHub dispatch for promotedJobId, or that job
+    // will sit in "dispatching" forever with no CI run ever triggered.
+    return respond({ ok: true, promotedJobId });
   }
 
   /** Issue a presigned GET for the finished result, only once status === done. */
@@ -393,7 +400,40 @@ export class JobRegistry {
 
     if (freedBytes > 0) await this.reserveQuota(-freedBytes);
 
-    return respond({ expiredCount, freedBytes, reclaimedSlots });
+    // Reconcile activeCount against reality instead of trusting the incrementally-maintained
+    // counter: anything that bypasses our callback path (a run cancelled directly on GitHub, a
+    // runner killed out-of-band, a lost message) can desync the counter from the true number of
+    // jobs actually occupying a slot. Recomputing it here, and promoting queued jobs into any
+    // slots that reconciliation frees up, makes the queue self-healing rather than requiring the
+    // 6h stall timeout to eventually notice.
+    const afterSweep = await this.state.storage.list<JobRecord>({ prefix: JOB_PREFIX });
+    const activeCiStatesForCount: JobStatus[] = ["dispatching", "downloading", "transcoding", "uploading"];
+    let trueActiveCount = 0;
+    for (const job of afterSweep.values()) {
+      if (activeCiStatesForCount.includes(job.status)) trueActiveCount++;
+    }
+    const previousActiveCount = await this.getActiveCount();
+    if (previousActiveCount !== trueActiveCount) {
+      await this.setActiveCount(trueActiveCount);
+    }
+
+    const promotedJobIds: string[] = [];
+    const maxParallel = Number(this.env.MAX_PARALLEL_JOBS);
+    while ((await this.getActiveCount()) < maxParallel) {
+      const promoted = await this.promoteNextQueued();
+      if (!promoted) break;
+      promotedJobIds.push(promoted.jobId);
+    }
+
+    return respond({
+      expiredCount,
+      freedBytes,
+      reclaimedSlots,
+      trueActiveCount,
+      // Same contract as /callback's promotedJobId: the caller MUST fire a real GitHub dispatch
+      // for each of these, or they'll sit in "dispatching" forever with no CI run behind them.
+      promotedJobIds,
+    });
   }
 }
 

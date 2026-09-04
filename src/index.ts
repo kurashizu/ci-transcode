@@ -66,7 +66,7 @@ export default {
       }
 
       if (pathname === "/internal/callback" && request.method === "POST") {
-        return handleInternalCallback(request, env);
+        return handleInternalCallback(request, env, ctx);
       }
 
       if (pathname === "/internal/source-url" && request.method === "POST") {
@@ -82,7 +82,7 @@ export default {
       // (fire-and-forget, never blocks the response) and explicitly via this authenticated endpoint
       // for external schedulers (e.g. a GitHub Actions cron, or any uptime-ping style caller).
       if (pathname === "/internal/sweep" && request.method === "POST") {
-        return handleInternalSweep(request, env);
+        return handleInternalSweep(request, env, ctx);
       }
 
       return errorResponse(404, "not found");
@@ -105,11 +105,52 @@ async function handleCreateJob(request: Request, env: Env, ctx: ExecutionContext
   }
 
   // Opportunistic lazy sweep: cheap (single DO round trip, no-op if nothing expired) and never
-  // blocks this request's response.
-  ctx.waitUntil(callDO(env, "/sweep", {}).catch(() => {}));
+  // blocks this request's response. Any queued job the sweep promotes still needs its GitHub
+  // dispatch actually fired (the DO never calls out to GitHub itself).
+  ctx.waitUntil(
+    callDO(env, "/sweep", {})
+      .then(async (res) => {
+        const data: any = await res.json();
+        for (const jobId of data?.promotedJobIds ?? []) {
+          fireDispatch(jobId, request.url, env, ctx);
+        }
+      })
+      .catch(() => {}),
+  );
 
   const doRes = await callDO(env, "/create", body);
   return doRes;
+}
+
+/**
+ * Actually fires the GitHub repository_dispatch for a job the DO has already marked
+ * "dispatching" (whether from a fresh commit or a queue promotion). The DO itself never makes
+ * outbound calls to GitHub -- every path that transitions a job into "dispatching" MUST route
+ * through this function, or that job will sit dispatching forever with no CI run behind it.
+ */
+function fireDispatch(jobId: string, requestUrl: string, env: Env, ctx: ExecutionContext): void {
+  ctx.waitUntil(
+    (async () => {
+      const jobRes = await callDO(env, `/job/${jobId}`);
+      const jobData: any = await jobRes.json();
+      const job: JobRecord | undefined = jobData?.job;
+      if (!job) return;
+
+      const callbackUrl = new URL(requestUrl);
+      callbackUrl.pathname = "/internal/callback";
+      callbackUrl.search = "";
+
+      try {
+        await dispatchTranscodeJob(env, job, callbackUrl.toString());
+      } catch (err: any) {
+        await callDO(env, "/callback", {
+          jobId,
+          status: "failed",
+          error: `dispatch failed: ${err?.message ?? err}`,
+        });
+      }
+    })(),
+  );
 }
 
 async function handleCommitJob(
@@ -126,26 +167,7 @@ async function handleCommitJob(
   if (!doRes.ok) return json(data, { status: doRes.status });
 
   if (data.dispatchNow) {
-    // Fetch the job record so we can build the dispatch payload; do this via the DO's /job/:id.
-    const jobRes = await callDO(env, `/job/${jobId}`);
-    const jobData: any = await jobRes.json();
-    const job: JobRecord | undefined = jobData?.job;
-
-    if (job) {
-      const callbackUrl = new URL(request.url);
-      callbackUrl.pathname = "/internal/callback";
-      callbackUrl.search = "";
-
-      ctx.waitUntil(
-        dispatchTranscodeJob(env, job, callbackUrl.toString()).catch(async (err) => {
-          await callDO(env, "/callback", {
-            jobId,
-            status: "failed",
-            error: `dispatch failed: ${err?.message ?? err}`,
-          });
-        }),
-      );
-    }
+    fireDispatch(jobId, request.url, env, ctx);
   }
 
   return json({ jobId, status: data.status, queued: !!data.queued });
@@ -197,12 +219,18 @@ function requireInternalAuth(request: Request, env: Env): Response | null {
   return null;
 }
 
-async function handleInternalCallback(request: Request, env: Env): Promise<Response> {
+async function handleInternalCallback(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const authErr = requireInternalAuth(request, env);
   if (authErr) return authErr;
 
   const body = await request.json();
   const doRes = await callDO(env, "/callback", body);
+  const data: any = await doRes.clone().json();
+
+  if (data?.promotedJobId) {
+    fireDispatch(data.promotedJobId, request.url, env, ctx);
+  }
+
   return doRes;
 }
 
@@ -230,10 +258,16 @@ async function handleInternalResultUrl(request: Request, env: Env): Promise<Resp
   return json({ url });
 }
 
-async function handleInternalSweep(request: Request, env: Env): Promise<Response> {
+async function handleInternalSweep(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const authErr = requireInternalAuth(request, env);
   if (authErr) return authErr;
 
   const doRes = await callDO(env, "/sweep", {});
+  const data: any = await doRes.clone().json();
+
+  for (const jobId of data?.promotedJobIds ?? []) {
+    fireDispatch(jobId, request.url, env, ctx);
+  }
+
   return doRes;
 }
