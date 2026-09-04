@@ -150,6 +150,8 @@ export class JobRegistry {
       uploadUrl,
       uploadMethod: "PUT",
       expiresAt: new Date(job.expiresAt).toISOString(),
+      crf: job.crf,
+      preset: job.preset,
     });
   }
 

@@ -23,6 +23,9 @@ Create a new job and request an upload URL.
 | \`crf\` | Integer 0-63, default 40 |
 | \`preset\` | Integer 0-13 (SVT-AV1 numeric preset: 0 = slowest/best quality, 13 = fastest), default 4 |
 
+Out-of-range values are clamped, not rejected. The response's \`crf\`/\`preset\` fields report the
+values actually stored -- check them if you want to confirm what was accepted.
+
 \`\`\`
 curl -X POST https://your-worker.example.workers.dev/jobs \\
   -H 'content-type: application/json' \\
@@ -35,7 +38,9 @@ curl -X POST https://your-worker.example.workers.dev/jobs \\
   "token": "xxxxx...",
   "uploadUrl": "https://...r2.cloudflarestorage.com/...",
   "uploadMethod": "PUT",
-  "expiresAt": "2026-09-05T14:00:00.000Z"
+  "expiresAt": "2026-09-05T14:00:00.000Z",
+  "crf": 32,
+  "preset": 4
 }
 \`\`\`
 
