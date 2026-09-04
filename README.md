@@ -1,102 +1,112 @@
 # ci-transcode
 
-基于 Cloudflare Workers + Durable Objects + R2 + GitHub Actions 的异步 AV1 软件转码服务。
+Asynchronous AV1 software transcoding service built on Cloudflare Workers + Durable Objects + R2 + GitHub Actions.
 
-- 转码引擎：ffmpeg (libsvtav1)，可配置 `crf`（默认 40）、`preset`（默认 slow）
-- 并行度：最多 10 个并行转码任务（Durable Object 原子计数）
-- 存储：Cloudflare R2，5GB 配额，满时按 LRU 驱逐，任务默认 1 天 TTL
-- 全程加密隐私：R2 桶私有（仅预签名 URL 读写），CI 不输出/不记录任何视频文件名或元数据
-- API 文档：部署后访问 Worker 根路径 `/`
+- Transcode engine: ffmpeg (libsvtav1), configurable `crf` (default 40) and `preset` (default slow)
+- Concurrency: up to 10 parallel transcode jobs (atomically enforced by a Durable Object)
+- Storage: Cloudflare R2, 5GB quota, LRU eviction when full, 1-day TTL per job by default
+- Privacy-first: the R2 bucket is private (all access via presigned URLs), CI never logs or emits any video filename or metadata
+- API docs: visit the Worker's root path `/` after deployment
 
-## 目录结构
+## Project layout
 
 ```
 src/
-  index.ts                    Worker 入口，路由与 REST API
-  docs.ts                     API 文档页（HTML，挂载在 / 和 /docs）
-  types.ts                    共享类型定义
-  util.ts                     随机 id/token、鉴权辅助
-  r2sign.ts                   R2 (S3 兼容) 预签名 URL 生成
-  github.ts                   repository_dispatch 调用封装
+  index.ts                    Worker entrypoint, routing and REST API
+  docs.ts                     API docs page (HTML, served at / and /docs)
+  types.ts                    Shared type definitions
+  util.ts                     Random id/token generation, auth helpers
+  r2sign.ts                   R2 (S3-compatible) presigned URL generation
+  github.ts                   repository_dispatch call wrapper
   durable-objects/
-    job-registry.ts           全局协调器：任务状态、并发槽位、LRU/TTL 驱逐
+    job-registry.ts           Global coordinator: job state, concurrency slots, LRU/TTL eviction
 .github/workflows/
-  transcode.yml                CI: 下载源 -> ffmpeg 转码 -> 上传结果 -> 回调状态
+  transcode.yml                CI: download source -> ffmpeg transcode -> upload result -> report status
 scripts/
-  e2e.sh                       端到端冒烟测试脚本
+  e2e.sh                       End-to-end smoke test script
 ```
 
-## 部署步骤
+## Deployment
 
-### 1. 创建 R2 桶
+### 1. Create the R2 bucket
 
 ```bash
 wrangler r2 bucket create ci-transcode-store
 ```
 
-### 2. 创建 R2 API Token（用于预签名，S3 兼容凭证）
+### 2. Create an R2 API Token (S3-compatible credentials, used for presigning)
 
-Cloudflare Dashboard → R2 → Manage R2 API Tokens → 创建一个具有该桶读写权限的 Token，
-记录 **Account ID**、**Access Key ID**、**Secret Access Key**。
+Cloudflare Dashboard → R2 → Manage R2 API Tokens → create a token with read/write access to
+the bucket above. Record the **Account ID**, **Access Key ID**, and **Secret Access Key**.
 
-### 3. 准备 GitHub 仓库
+### 3. Set up the GitHub repository
 
-本仓库自身就是 CI 端仓库（包含 `.github/workflows/transcode.yml`）。在仓库 Settings → Secrets and variables → Actions 中添加：
+This repository doubles as the CI-side repo (it contains `.github/workflows/transcode.yml`).
+Under Settings → Secrets and variables → Actions, add:
 
-| Secret | 说明 |
+| Secret/Variable | Description |
 |---|---|
-| `INTERNAL_CALLBACK_SECRET` | 与 Worker 端相同的内部密钥，CI 用它认证回调/预签名请求 |
-| `WORKER_BASE_URL` | 部署后的 Worker 根地址，如 `https://ci-transcode.xxx.workers.dev` |
+| `INTERNAL_CALLBACK_SECRET` (secret) | Shared secret matching the Worker's copy; CI uses it to authenticate callback/presign requests |
+| `WORKER_BASE_URL` (variable) | The deployed Worker's origin, e.g. `https://ci-transcode.xxx.workers.dev` |
 
-### 4. 创建 GitHub PAT（供 Worker 触发 repository_dispatch）
+### 4. Create a GitHub PAT (for the Worker to trigger repository_dispatch)
 
-Fine-grained PAT，仅需该仓库的 `Contents: Read and write` + `Metadata: Read-only` 权限
-（repository_dispatch 需要 `contents: write` 等价权限）。
+A fine-grained PAT scoped to this repository's `Contents: Read and write` permission
+(repository_dispatch requires the equivalent of `contents: write`).
 
-### 5. 配置 Worker Secrets
+### 5. Configure Worker secrets
 
-只有真正敏感的凭证才作为 secret；GitHub owner/repo、R2 account id、桶名等不敏感的配置直接写在
-`wrangler.toml` 的 `[vars]` 里（随源码提交，按需自行修改）。
+Only genuinely sensitive credentials are stored as secrets; non-sensitive configuration
+(GitHub owner/repo, R2 account id, bucket name) lives as plain `[vars]` in `wrangler.toml`
+and is committed with the source — edit it directly as needed.
 
 ```bash
-wrangler secret put GITHUB_TOKEN             # 步骤 4 的 PAT
-wrangler secret put INTERNAL_CALLBACK_SECRET # 与步骤 3 一致的随机字符串
+wrangler secret put GITHUB_TOKEN             # PAT from step 4
+wrangler secret put INTERNAL_CALLBACK_SECRET # same random string as step 3
 wrangler secret put R2_ACCESS_KEY_ID
 wrangler secret put R2_SECRET_ACCESS_KEY
 ```
 
-### 6. 部署
+### 6. Deploy
 
 ```bash
 npm install
 npm run deploy
 ```
 
-## 端到端测试
+## End-to-end test
 
 ```bash
 BASE_URL=https://ci-transcode.<subdomain>.workers.dev ./scripts/e2e.sh
 ```
 
-脚本会：创建任务 → 生成一个 2 秒测试视频并 PUT 到预签名地址 → commit 触发 CI →
-轮询状态直到 `done`/`failed` → 下载转码结果并校验文件存在。
+The script creates a job, generates a 2-second test clip and PUTs it to the presigned upload
+URL, commits the job to trigger CI, polls status until `done`/`failed`, then downloads the
+transcoded result and confirms it exists.
 
-## API 一览
+## API overview
 
-见部署后的 `GET /` 页面，或直接读 `src/docs.ts`。核心流程：
+See the `GET /` page after deployment, or read `src/docs.ts` directly. Core flow:
 
 ```
 POST /jobs                    -> { jobId, token, uploadUrl }
-PUT  <uploadUrl>               (直传 R2)
-POST /jobs/{id}/commit         (Bearer token, 触发 CI)
-GET  /jobs/{id}                (Bearer token, 查询状态)
-GET  /jobs/{id}/result          (Bearer token, done 后拿预签名下载地址)
+PUT  <uploadUrl>               (direct upload to R2)
+POST /jobs/{id}/commit         (Bearer token, triggers CI)
+GET  /jobs/{id}                (Bearer token, poll status)
+GET  /jobs/{id}/result          (Bearer token, presigned download URL once done)
 ```
 
-## 安全设计要点
+## Security design notes
 
-- 每个任务的 `token` 由 32 字节 CSPRNG 生成，是访问该任务的唯一凭证，仅在创建时返回一次。
-- R2 对象 key 全部是随机 ID，不含原始文件名；桶本身无公网直接访问权限。
-- CI 通过 `/internal/*` 接口向 Worker 换取一次性预签名 URL 来读写 R2，R2 的长期凭证（Access Key/Secret）永远不出现在 CI 环境中。
-- ffmpeg 执行时 `-loglevel error -nostats` 且 stdout/stderr 被丢弃，不落盘、不上传、不进日志；仅进程退出码决定成功/失败。
-- 源文件在任务终止（成功或失败）后立即删除；结果文件默认 1 天后随 TTL 清理，存储超配额时按最久未访问优先驱逐。
+- Each job's `token` is generated from 32 bytes of CSPRNG output — the sole credential for
+  accessing that job, returned only once at creation time.
+- R2 object keys are random IDs; they never contain the original filename. The bucket itself
+  has no public network access.
+- CI exchanges its internal secret for short-lived, single-purpose presigned URLs via
+  `/internal/*` endpoints to read/write R2 — R2's long-lived credentials (Access Key/Secret)
+  never touch the CI environment.
+- ffmpeg runs with `-loglevel error -nostats` and its stdout/stderr are discarded — never
+  written to disk, uploaded, or logged. Only the process exit code determines success/failure.
+- The source file is deleted immediately once a job terminates (success or failure). Result
+  files expire after 1 day by default via TTL, and the oldest-accessed objects are evicted
+  first once storage exceeds quota.
