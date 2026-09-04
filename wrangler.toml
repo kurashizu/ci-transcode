@@ -40,3 +40,9 @@ STALL_TIMEOUT_SECONDS = "21600" # 6h: if a job sits in an active CI stage (dispa
 UPLOAD_URL_TTL_SECONDS = "3600" # 1 hour to upload source
 RESULT_URL_TTL_SECONDS = "3600" # 1 hour to download result once ready
 MAX_UPLOAD_BYTES = "2147483648" # 2 GiB per-file cap, tune as needed
+MAX_ESTIMATED_CI_SECONDS = "10800" # 3h: CI probes the real source (ffprobe, after download) and
+                                    # estimates its own transcode time from duration/resolution/
+                                    # preset; if the estimate exceeds this, CI aborts before ever
+                                    # running ffmpeg rather than tying up a runner for the full
+                                    # timeout-minutes budget on a config that was never going to
+                                    # finish in a reasonable time.

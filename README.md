@@ -123,3 +123,20 @@ GET  /jobs/{id}/result          (Bearer token, presigned download URL once done)
   also reconciles the concurrency counter against jobs' real state and force-fails anything
   stuck in an active CI stage for more than 6 hours (`STALL_TIMEOUT_SECONDS`), so an out-of-band
   cancellation or a lost callback can't leak a slot indefinitely.
+- Every CI callback also carries `$GITHUB_RUN_ID`, recorded on the job as `ciRunHint`. The sweep
+  cross-checks each active job's specific run id against GitHub's real queued/in-progress runs
+  (via the GitHub API) and fails only the ones whose exact run is provably gone — this is a
+  precise, per-record fact check, never a guess from aggregate counts. (An earlier version
+  compared DO active-record counts against GitHub's real run count and killed the
+  oldest-`updatedAt` records to make the totals match; that shipped once and force-failed
+  genuinely running jobs, because a job mid-transcode can go untouched for many minutes between
+  callbacks. Do not reintroduce that pattern — see the comment above `handleSweep`'s orphan
+  detection in `job-registry.ts`.)
+- Source uploads are capped at 2 GiB (`MAX_UPLOAD_BYTES`), enforced after upload via an R2 `HEAD`
+  on commit; an oversized object is deleted and the commit rejected.
+- Before running ffmpeg, CI probes the real source (duration/resolution via `ffprobe`) and
+  estimates its own transcode time from an empirical preset/resolution model, calibrated against
+  one real run on GitHub's standard 2 vCPU runner. If the estimate exceeds `MAX_ESTIMATED_CI_SECONDS`
+  (3h default), CI aborts before transcoding rather than occupying a runner for hours on a config
+  that was never going to finish. None of the probed values are ever logged or reported back —
+  only the pass/fail decision crosses out of that step.

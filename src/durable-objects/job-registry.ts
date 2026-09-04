@@ -47,7 +47,10 @@ export class JobRegistry {
         return await this.handleResultUrl(request);
       }
       if (path === "/sweep" && request.method === "POST") {
-        return await this.handleSweep();
+        const body = await request
+          .json<{ activeRunIds?: number[] }>()
+          .catch(() => ({ activeRunIds: undefined }));
+        return await this.handleSweep(body.activeRunIds);
       }
       return new Response("not found", { status: 404 });
     } catch (err: any) {
@@ -221,6 +224,7 @@ export class JobRegistry {
       status: JobStatus;
       error?: string;
       resultBytes?: number;
+      runId?: number;
     }>();
     const job = await this.getJob(body.jobId);
     if (!job) return respond({ error: "not found" }, 404);
@@ -228,6 +232,9 @@ export class JobRegistry {
     job.status = body.status;
     if (body.error) job.error = body.error;
     if (typeof body.resultBytes === "number") job.resultBytes = body.resultBytes;
+    // Recorded so the sweep can later confirm this exact run still exists on GitHub's side
+    // instead of guessing from aggregate counts -- see fetchActiveRunIds in github.ts.
+    if (typeof body.runId === "number") job.ciRunHint = String(body.runId);
     await this.touchLru(job.jobId);
 
     let promotedJobId: string | null = null;
@@ -347,8 +354,14 @@ export class JobRegistry {
 
   /** Periodic sweep (invoked by the Worker's cron trigger): expire stale jobs past TTL, free R2,
    * and reclaim concurrency slots leaked by jobs whose CI callback was lost (GitHub/Worker outage,
-   * a runner that died without reaching its `if: failure()` step, etc). */
-  private async handleSweep(): Promise<Response> {
+   * a runner that died without reaching its `if: failure()` step, etc).
+   *
+   * `activeRunIds`, when provided by the caller (a GitHub Actions API query for run ids actually
+   * queued/in_progress), catches a gap the internal-only reconciliation below cannot: a run
+   * terminated out-of-band (`gh run cancel`, or a runner that vanished without GitHub itself
+   * flagging it) skips `if: failure()` entirely, so our callback never fires and the job record
+   * keeps reporting an active CI status forever -- internally self-consistent, but wrong. */
+  private async handleSweep(activeRunIds?: number[]): Promise<Response> {
     const now = Date.now();
     const all = await this.state.storage.list<JobRecord>({ prefix: JOB_PREFIX });
     let expiredCount = 0;
@@ -413,6 +426,56 @@ export class JobRegistry {
       await this.setActiveCount(trueActiveCount);
     }
 
+    // Orphan detection: a job stuck reporting an active CI status whose run was actually
+    // terminated out-of-band (a manual `gh run cancel`, or a runner that vanished without GitHub
+    // itself flagging it) skips `if: failure()` entirely, so our callback never fires and the
+    // record would otherwise sit "active" until the 6h stall timeout.
+    //
+    // This MUST be a precise, per-record check, never a guess from aggregate numbers: an earlier
+    // version compared DO active-record count against GitHub's real run count and killed the
+    // oldest-updated records to make the totals match. That shipped once and force-failed 3
+    // genuinely running jobs, because a job legitimately mid-transcode can go untouched for many
+    // minutes between its "transcoding" and "uploading" callbacks -- "oldest updatedAt" is not a
+    // safe proxy for "orphaned". Do not reintroduce that pattern.
+    //
+    // Instead: a record only becomes an orphan candidate once it has actually named a specific
+    // GitHub run (job.ciRunHint, set by handleCallback from the workflow's own $GITHUB_RUN_ID).
+    // If that exact run id is no longer in GitHub's queued/in_progress set, AND enough time has
+    // passed since the last callback that we can't just be racing GitHub's eventual-consistency
+    // window, the record is failed -- one job, one run, one direct fact check, never a count.
+    const ORPHAN_GRACE_MS = 5 * 60 * 1000;
+    let orphanedCount = 0;
+    if (activeRunIds) {
+      const activeRunIdSet = new Set(activeRunIds);
+      const orphans = Array.from(afterSweep.values()).filter(
+        (j) =>
+          activeCiStatesForCount.includes(j.status) &&
+          j.ciRunHint !== null &&
+          !activeRunIdSet.has(Number(j.ciRunHint)) &&
+          now - j.updatedAt > ORPHAN_GRACE_MS,
+      );
+
+      let orphanedFreedBytes = 0;
+      for (const job of orphans) {
+        job.status = "failed";
+        job.error =
+          `orphaned: GitHub run ${job.ciRunHint} is no longer queued/in_progress and no further ` +
+          "status update arrived (likely cancelled or terminated out-of-band, so no callback was " +
+          "ever sent for its completion)";
+        await this.env.BUCKET.delete(job.sourceKey).catch(() => {});
+        if (job.sourceBytes) orphanedFreedBytes += job.sourceBytes;
+        await this.putJobRaw(job);
+        orphanedCount++;
+      }
+
+      if (orphanedCount > 0) {
+        const active = await this.getActiveCount();
+        await this.setActiveCount(Math.max(0, active - orphanedCount));
+        if (orphanedFreedBytes > 0) await this.reserveQuota(-orphanedFreedBytes);
+        freedBytes += orphanedFreedBytes;
+      }
+    }
+
     const promotedJobIds: string[] = [];
     const maxParallel = Number(this.env.MAX_PARALLEL_JOBS);
     while ((await this.getActiveCount()) < maxParallel) {
@@ -426,6 +489,7 @@ export class JobRegistry {
       freedBytes,
       reclaimedSlots,
       trueActiveCount,
+      orphanedCount,
       // Same contract as /callback's promotedJobId: the caller MUST fire a real GitHub dispatch
       // for each of these, or they'll sit in "dispatching" forever with no CI run behind them.
       promotedJobIds,

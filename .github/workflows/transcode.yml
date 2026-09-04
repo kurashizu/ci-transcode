@@ -19,6 +19,8 @@ jobs:
       CRF: ${{ github.event.client_payload.crf }}
       PRESET: ${{ github.event.client_payload.preset }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+      RUN_ID: ${{ github.run_id }}
+      MAX_ESTIMATED_CI_SECONDS: ${{ github.event.client_payload.max_estimated_ci_seconds }}
       INTERNAL_SECRET: ${{ secrets.INTERNAL_CALLBACK_SECRET }}
       WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
       FFMPEG_VERSION: "master-latest"
@@ -77,7 +79,7 @@ jobs:
           callback.sh -X POST "$CALLBACK_URL" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
-            -d "$(jq -nc --arg id "$JOB_ID" '{jobId:$id,status:"downloading"}')" >/dev/null
+            -d "$(jq -nc --arg id "$JOB_ID" --arg rid "$RUN_ID" '{jobId:$id,status:"downloading",runId:($rid|tonumber)}')" >/dev/null
 
       - name: Fetch presigned source URL
         id: source-url
@@ -100,12 +102,78 @@ jobs:
           curl -fsS --connect-timeout 15 -o /tmp/input.src "$(cat /tmp/source_url.txt)"
           rm -f /tmp/source_url.txt
 
+      - name: Gatekeeper -- estimate transcode time, abort if it exceeds budget
+        id: gatekeeper
+        run: |
+          set -euo pipefail
+          # Probes the REAL source (duration + resolution) now that it's downloaded, rather than
+          # trusting anything the caller claimed. Nothing this step learns is ever printed to the
+          # job log or reported anywhere: every number stays inside this single process and only
+          # the pass/fail exit code crosses back out, consistent with this pipeline never emitting
+          # video metadata.
+          probe=$(ffprobe -v error -select_streams v:0 \
+            -show_entries format=duration:stream=width,height \
+            -of default=noprint_wrappers=1 /tmp/input.src 2>/dev/null) || {
+            echo "::error::could not probe source duration/resolution" >&2
+            exit 1
+          }
+
+          # Empirical model, calibrated once against a real run on this exact runner class
+          # (GitHub Actions ubuntu-latest, 2 vCPU): a 1280x720 clip at preset 4 / crf 40 took
+          # ~1.2 CI-seconds per source-second (18s to transcode a 15s clip). SVT-AV1 preset speed
+          # doesn't scale linearly, so preset is mapped through a lookup table built from a local
+          # 2-core-limited benchmark sweep (presets 2/4/6/8/10/13), normalized to preset 4 = 1.0
+          # and linearly interpolated/extrapolated for the untested presets in between and below.
+          # CRF has only a minor effect on encode time at a given preset (per this project's own
+          # CRF/preset benchmark matrix) so it is intentionally not a model input.
+          #
+          # This is a deliberately conservative gate, not a precise time predictor: resolution is
+          # scaled linearly by pixel count (AV1 motion search cost likely scales worse than
+          # linear, so real time on large/high-motion sources tends to run UNDER this estimate,
+          # not over) and a 1.5x safety margin is layered on top. Its only job is to catch configs
+          # that are obviously never finishing in a reasonable time (e.g. preset 0 on a 4K feature
+          # film) before burning hours of runner time on them -- not to bill or schedule precisely.
+          printf '%s\n' "$probe" | PRESET="$PRESET" MAX_ESTIMATED_CI_SECONDS="$MAX_ESTIMATED_CI_SECONDS" \
+            python3 -c '
+          import os, sys
+
+          values = {}
+          for line in sys.stdin:
+              line = line.strip()
+              if not line or "=" not in line:
+                  continue
+              key, _, val = line.partition("=")
+              values[key] = val
+
+          duration = float(values["duration"])
+          width = int(values["width"])
+          height = int(values["height"])
+          preset = max(0, min(13, int(os.environ["PRESET"])))
+          max_seconds = float(os.environ["MAX_ESTIMATED_CI_SECONDS"])
+
+          # preset -> relative encode time, normalized to preset 4 = 1.0 (see comment above)
+          table = {0: 13.535, 1: 7.057, 2: 3.679, 3: 2.340, 4: 1.000, 5: 0.790, 6: 0.580,
+                   7: 0.448, 8: 0.315, 9: 0.215, 10: 0.114, 11: 0.111, 12: 0.108, 13: 0.105}
+          preset_multiplier = table[preset]
+
+          ANCHOR_CI_SECONDS_PER_SOURCE_SECOND = 1.2   # measured: preset 4, 1280x720
+          ANCHOR_PIXELS = 1280 * 720
+          SAFETY_MARGIN = 1.5
+
+          pixel_ratio = (width * height) / ANCHOR_PIXELS
+          estimated_seconds = (
+              duration * ANCHOR_CI_SECONDS_PER_SOURCE_SECOND * preset_multiplier * pixel_ratio * SAFETY_MARGIN
+          )
+
+          sys.exit(0 if estimated_seconds <= max_seconds else 1)
+          '
+
       - name: Report transcoding
         run: |
           callback.sh -X POST "$CALLBACK_URL" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
-            -d "$(jq -nc --arg id "$JOB_ID" '{jobId:$id,status:"transcoding"}')" >/dev/null
+            -d "$(jq -nc --arg id "$JOB_ID" --arg rid "$RUN_ID" '{jobId:$id,status:"transcoding",runId:($rid|tonumber)}')" >/dev/null
 
       - name: Transcode to AV1 (libsvtav1)
         id: transcode
@@ -129,7 +197,7 @@ jobs:
           callback.sh -X POST "$CALLBACK_URL" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
-            -d "$(jq -nc --arg id "$JOB_ID" '{jobId:$id,status:"uploading"}')" >/dev/null
+            -d "$(jq -nc --arg id "$JOB_ID" --arg rid "$RUN_ID" '{jobId:$id,status:"uploading",runId:($rid|tonumber)}')" >/dev/null
 
       - name: Fetch presigned result URL
         id: result-url
@@ -173,21 +241,28 @@ jobs:
             [verify-codecs]="${{ steps.verify-codecs.outcome }}"
             [source-url]="${{ steps.source-url.outcome }}"
             [download-source]="${{ steps.download-source.outcome }}"
+            [gatekeeper]="${{ steps.gatekeeper.outcome }}"
             [transcode]="${{ steps.transcode.outcome }}"
             [result-url]="${{ steps.result-url.outcome }}"
             [upload-result]="${{ steps.upload-result.outcome }}"
           )
-          for step in install-ffmpeg verify-codecs source-url download-source transcode result-url upload-result; do
+          for step in install-ffmpeg verify-codecs source-url download-source gatekeeper transcode result-url upload-result; do
             if [ "${OUTCOMES[$step]}" = "failure" ]; then
               failed_step="$step"
               break
             fi
           done
+
+          error_message="pipeline failed at step: $failed_step"
+          if [ "$failed_step" = "gatekeeper" ]; then
+            error_message="rejected: estimated transcode time for this source/preset combination exceeds the ${MAX_ESTIMATED_CI_SECONDS}s budget; retry with a faster preset or a shorter/lower-resolution source"
+          fi
+
           callback.sh -X POST "$CALLBACK_URL" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
-            -d "$(jq -nc --arg id "$JOB_ID" --arg step "$failed_step" \
-              '{jobId:$id,status:"failed",error:("pipeline failed at step: " + $step)}')" >/dev/null || true
+            -d "$(jq -nc --arg id "$JOB_ID" --arg msg "$error_message" \
+              '{jobId:$id,status:"failed",error:$msg}')" >/dev/null || true
 
       - name: Cleanup workspace
         if: always()

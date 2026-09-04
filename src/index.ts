@@ -1,6 +1,6 @@
 import type { Env, JobRecord } from "./types";
 import { json, errorResponse, bearerToken, safeEqual } from "./util";
-import { dispatchTranscodeJob } from "./github";
+import { dispatchTranscodeJob, fetchActiveRunIds } from "./github";
 import { presignGet, presignPut } from "./r2sign";
 import { API_DOCS_MARKDOWN, renderDocsHtml } from "./docs";
 export { JobRegistry } from "./durable-objects/job-registry";
@@ -279,7 +279,16 @@ async function handleInternalSweep(request: Request, env: Env, ctx: ExecutionCon
   const authErr = requireInternalAuth(request, env);
   if (authErr) return authErr;
 
-  const doRes = await callDO(env, "/sweep", {});
+  // Cross-check against GitHub's real queued/in_progress run ids -- this is what catches jobs
+  // orphaned by an out-of-band cancellation or a vanished runner (see handleSweep's docs). Best
+  // effort: a failed/timed-out GitHub query just skips that reconciliation for this pass rather
+  // than blocking the sweep, since TTL/stall-timeout sweeping must still work during a GitHub
+  // outage.
+  const activeRunIds = await fetchActiveRunIds(env);
+
+  const doRes = await callDO(env, "/sweep", {
+    activeRunIds: activeRunIds ? [...activeRunIds] : undefined,
+  });
   const data: any = await doRes.clone().json();
 
   for (const jobId of data?.promotedJobIds ?? []) {

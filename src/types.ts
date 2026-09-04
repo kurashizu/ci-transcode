@@ -22,6 +22,7 @@ export interface Env {
   UPLOAD_URL_TTL_SECONDS: string;
   RESULT_URL_TTL_SECONDS: string;
   MAX_UPLOAD_BYTES: string;
+  MAX_ESTIMATED_CI_SECONDS: string;
 }
 
 export type JobStatus =

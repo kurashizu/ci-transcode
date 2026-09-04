@@ -127,14 +127,33 @@ Results are AV1 (\`libsvtav1\`) video + Opus audio in an **MP4** container (fast
 not Matroska — this maximizes out-of-the-box player compatibility (QuickTime, for example,
 doesn't support \`.mkv\` at all).
 
+## Limits
+
+- **Source file size**: 2 GiB max. Enforced on commit (after upload, via an R2 \`HEAD\` on the
+  object) — an oversized upload is deleted and the commit rejected with \`413\`.
+- **Estimated transcode time**: CI probes the real source (duration + resolution via \`ffprobe\`,
+  after downloading it) and estimates its own encode time from duration, resolution, and
+  \`preset\`. If that estimate exceeds a 3 hour budget, CI aborts before ever running \`ffmpeg\` and
+  the job fails with an explanatory \`error\` — rather than tying up a runner for hours on a
+  config that was never going to finish in reasonable time (e.g. \`preset: 0\` on a 4K source).
+  This is a conservative, deliberately approximate gate (calibrated against one real measurement
+  on GitHub's standard 2 vCPU runner, scaled by resolution and a per-preset speed table, with a
+  1.5x safety margin) — not a precise time predictor. Use a faster preset or a shorter/lower
+  resolution source if a job is rejected this way.
+- **Real-time (1x) transcoding**: not guaranteed, and generally not achievable for 1080p+ sources
+  on GitHub's standard 2 vCPU runners even at the fastest preset — SVT-AV1 software encoding is
+  CPU-bound and this pipeline intentionally doesn't reach for hardware encoders. A real
+  measurement on this pipeline (720p, \`preset: 4\`, standard runner) transcoded a 15s clip in 18s
+  (~0.83x realtime). Faster presets (10-13) get closer to or above 1x for 720p and below.
+
 ## Privacy and security
 
 - The R2 bucket is fully private; all reads/writes go through short-lived (1 hour by default) presigned URLs.
 - Object keys are random IDs and never contain the original filename; the internal endpoints CI uses to fetch presigned URLs validate that a key matches this service's own key shape before signing anything.
-- CI only ever receives the job id, R2 keys, crf, and preset. ffmpeg's own output and ffprobe metadata are never logged or reported back. A failed job's \`error\` names only which pipeline step failed (e.g. \`"pipeline failed at step: transcode"\`) — never any video content or filename.
+- CI only ever receives the job id, R2 keys, crf, and preset. ffmpeg's own output and ffprobe metadata (including the duration/resolution the gatekeeper probes) are never logged or reported back — only pass/fail crosses back out. A failed job's \`error\` names only which pipeline step failed (e.g. \`"pipeline failed at step: transcode"\`) — never any video content or filename.
 - The source file is deleted from R2 immediately once the job terminates (success or failure).
 - Result files expire automatically after 1 day by default; when storage exceeds the 5GB quota, the least-recently-accessed objects are evicted first (LRU).
-- A stalled job (stuck in an active CI stage with no status update for 6 hours — e.g. a lost callback from a GitHub/network outage) is automatically marked failed and its concurrency slot reclaimed, rather than blocking that slot indefinitely.
+- A stalled job (stuck in an active CI stage with no status update for 6 hours — e.g. a lost callback from a GitHub/network outage) is automatically marked failed and its concurrency slot reclaimed, rather than blocking that slot indefinitely. A sweep also cross-checks each active job's specific GitHub run id against GitHub's real queued/in-progress runs, catching a run cancelled or terminated out-of-band well before the 6 hour stall timeout would.
 `;
 
 function escapeHtml(s: string): string {
