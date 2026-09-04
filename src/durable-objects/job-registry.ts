@@ -126,7 +126,7 @@ export class JobRegistry {
       updatedAt: now,
       expiresAt: now + ttlMs,
       sourceKey: `sources/${jobId}/${randomId(8)}.bin`,
-      resultKey: `results/${jobId}/${randomId(8)}.av1.mkv`,
+      resultKey: `results/${jobId}/${randomId(8)}.av1.mp4`,
       sourceBytes: null,
       resultBytes: null,
       crf,

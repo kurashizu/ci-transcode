@@ -114,7 +114,8 @@ jobs:
             -map_metadata -1 -map_chapters -1 \
             -c:v libsvtav1 -crf "$CRF" -preset "$PRESET" \
             -c:a libopus -b:a 128k \
-            -f matroska /tmp/output.av1.mkv \
+            -movflags +faststart \
+            -f mp4 /tmp/output.av1.mp4 \
             > /dev/null 2> /dev/null
           rm -f /tmp/input.src
 
@@ -139,10 +140,10 @@ jobs:
       - name: Upload result to R2
         run: |
           set -euo pipefail
-          size=$(stat -c%s /tmp/output.av1.mkv)
-          curl -fsS --connect-timeout 15 -X PUT "$(cat /tmp/result_url.txt)" --data-binary @/tmp/output.av1.mkv
+          size=$(stat -c%s /tmp/output.av1.mp4)
+          curl -fsS --connect-timeout 15 -X PUT "$(cat /tmp/result_url.txt)" --data-binary @/tmp/output.av1.mp4
           echo "RESULT_BYTES=$size" >> "$GITHUB_ENV"
-          rm -f /tmp/result_url.txt /tmp/output.av1.mkv
+          rm -f /tmp/result_url.txt /tmp/output.av1.mp4
 
       - name: Report done
         if: success()
@@ -162,4 +163,4 @@ jobs:
 
       - name: Cleanup workspace
         if: always()
-        run: rm -f /tmp/input.src /tmp/output.av1.mkv /tmp/source_url.txt /tmp/result_url.txt
+        run: rm -f /tmp/input.src /tmp/output.av1.mp4 /tmp/source_url.txt /tmp/result_url.txt
