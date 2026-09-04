@@ -21,7 +21,7 @@ jobs:
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
       INTERNAL_SECRET: ${{ secrets.INTERNAL_CALLBACK_SECRET }}
       WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
-      FFMPEG_VERSION: "n8.1-latest"
+      FFMPEG_VERSION: "master-latest"
     steps:
       - name: Cache ffmpeg static binary
         id: ffmpeg-cache
