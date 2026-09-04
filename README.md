@@ -3,10 +3,12 @@
 Asynchronous AV1 software transcoding service built on Cloudflare Workers + Durable Objects + R2 + GitHub Actions.
 
 - Transcode engine: ffmpeg (libsvtav1), configurable `crf` (default 40) and `preset` (0-13 numeric SVT-AV1 preset, default 4)
-- Concurrency: up to 10 parallel transcode jobs (atomically enforced by a Durable Object)
-- Storage: Cloudflare R2, 5GB quota, LRU eviction when full, 1-day TTL per job by default
-- Privacy-first: the R2 bucket is private (all access via presigned URLs), CI never logs or emits any video filename or metadata
-- API docs: visit the Worker's root path `/` after deployment
+- Output: AV1 + Opus in an MP4 container (not Matroska — maximizes player compatibility)
+- Concurrency: up to 10 parallel transcode jobs, enforced by a Durable Object; queued jobs are promoted the moment a slot frees up, and that promotion always fires a real GitHub dispatch (not just an internal status flip)
+- Storage: Cloudflare R2, 5GB quota, LRU eviction when full, 1-day TTL per job by default; expired job records are deleted outright, not just flagged, so the coordinator's state doesn't grow without bound
+- Self-healing: a periodic sweep reconciles the concurrency counter against jobs' actual state (recovers from an out-of-band GitHub Actions cancellation, a lost callback, etc.) and marks anything stalled in an active CI stage for 6+ hours as failed, freeing its slot
+- Privacy-first: the R2 bucket is private (all access via presigned URLs), CI never logs or emits any video filename or metadata — a failed job's error names only which pipeline step failed
+- API docs: visit the Worker's root path `/` after deployment (serves Markdown to curl/agents by default, HTML to browsers)
 
 ## Project layout
 
@@ -99,14 +101,25 @@ GET  /jobs/{id}/result          (Bearer token, presigned download URL once done)
 ## Security design notes
 
 - Each job's `token` is generated from 32 bytes of CSPRNG output — the sole credential for
-  accessing that job, returned only once at creation time.
+  accessing that job, returned only once at creation time. All token comparisons use a
+  constant-time equality check.
 - R2 object keys are random IDs; they never contain the original filename. The bucket itself
   has no public network access.
 - CI exchanges its internal secret for short-lived, single-purpose presigned URLs via
   `/internal/*` endpoints to read/write R2 — R2's long-lived credentials (Access Key/Secret)
-  never touch the CI environment.
+  never touch the CI environment. Those endpoints validate that the requested key matches this
+  service's own `sources/<id>/<id>.bin` / `results/<id>/<id>.av1.mp4` shape before signing
+  anything, so a leaked internal secret can't be used to sign arbitrary bucket paths.
 - ffmpeg runs with `-loglevel error -nostats` and its stdout/stderr are discarded — never
-  written to disk, uploaded, or logged. Only the process exit code determines success/failure.
+  written to disk, uploaded, or logged. Only the process exit code determines success/failure;
+  a failed job's `error` field names which pipeline step failed (e.g. "download", "transcode"),
+  never any file content.
 - The source file is deleted immediately once a job terminates (success or failure). Result
   files expire after 1 day by default via TTL, and the oldest-accessed objects are evicted
-  first once storage exceeds quota.
+  first once storage exceeds quota. Expired/evicted job records are deleted, not just flagged.
+- Every callback CI sends to the Worker, and the Worker's own dispatch call to GitHub, has an
+  explicit timeout (and CI's callbacks retry a few times) — a GitHub or network outage fails
+  fast instead of hanging a runner or silently stranding a job's concurrency slot. A sweep pass
+  also reconciles the concurrency counter against jobs' real state and force-fails anything
+  stuck in an active CI stage for more than 6 hours (`STALL_TIMEOUT_SECONDS`), so an out-of-band
+  cancellation or a lost callback can't leak a slot indefinitely.

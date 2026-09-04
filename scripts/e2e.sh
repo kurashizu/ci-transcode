@@ -78,7 +78,7 @@ echo "$result_resp"
 result_url=$(printf '%s' "$result_resp" | grep -o '"resultUrl":"[^"]*"' | cut -d'"' -f4)
 
 echo "== 7. downloading transcoded result =="
-curl -fsS -o "$work_dir/output.av1.mkv" "$result_url"
-ls -la "$work_dir/output.av1.mkv"
+curl -fsS -o "$work_dir/output.av1.mp4" "$result_url"
+ls -la "$work_dir/output.av1.mp4"
 
-echo "E2E OK: $work_dir/output.av1.mkv"
+echo "E2E OK: $work_dir/output.av1.mp4"

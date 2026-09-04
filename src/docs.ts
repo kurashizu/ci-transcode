@@ -109,16 +109,26 @@ curl https://your-worker.example.workers.dev/jobs/$JOB_ID/result \\
 | \`transcoding\` | ffmpeg is encoding to AV1 |
 | \`uploading\` | CI is uploading the result to R2 |
 | \`done\` | Finished, result available |
-| \`failed\` | Failed, see the \`error\` field |
-| \`expired\` | Past TTL (1 day by default) or evicted due to quota (LRU) |
+| \`failed\` | Failed — \`error\` names which pipeline step failed |
+
+There is no \`expired\` status. Once a job's TTL (1 day by default) passes, or it's evicted early
+under storage-quota pressure (LRU), its record is deleted outright: \`GET /jobs/{jobId}\` on an
+expired job returns a plain 404, the same as an id that never existed.
+
+## Output format
+
+Results are AV1 (\`libsvtav1\`) video + Opus audio in an **MP4** container (faststart flag set),
+not Matroska — this maximizes out-of-the-box player compatibility (QuickTime, for example,
+doesn't support \`.mkv\` at all).
 
 ## Privacy and security
 
 - The R2 bucket is fully private; all reads/writes go through short-lived (1 hour by default) presigned URLs.
-- Object keys are random IDs and never contain the original filename.
-- CI only ever receives the job id, R2 keys, crf, and preset. ffmpeg's own output and ffprobe metadata are never logged or reported back — nothing about the video's content appears in CI logs.
+- Object keys are random IDs and never contain the original filename; the internal endpoints CI uses to fetch presigned URLs validate that a key matches this service's own key shape before signing anything.
+- CI only ever receives the job id, R2 keys, crf, and preset. ffmpeg's own output and ffprobe metadata are never logged or reported back. A failed job's \`error\` names only which pipeline step failed (e.g. \`"pipeline failed at step: transcode"\`) — never any video content or filename.
 - The source file is deleted from R2 immediately once the job terminates (success or failure).
 - Result files expire automatically after 1 day by default; when storage exceeds the 5GB quota, the least-recently-accessed objects are evicted first (LRU).
+- A stalled job (stuck in an active CI stage with no status update for 6 hours — e.g. a lost callback from a GitHub/network outage) is automatically marked failed and its concurrency slot reclaimed, rather than blocking that slot indefinitely.
 `;
 
 function escapeHtml(s: string): string {
