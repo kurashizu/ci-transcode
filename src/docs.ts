@@ -76,6 +76,7 @@ Neither this service nor CI records or emits the original filename or any video 
   "jobId": "a1b2c3...",
   "status": "transcoding",
   "createdAt": "...", "updatedAt": "...", "expiresAt": "...",
+  "sourceBytes": 186662455, "resultBytes": null,
   "crf": 32, "preset": 4,
   "error": null
 }</code></pre>

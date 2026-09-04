@@ -152,6 +152,8 @@ async function handleGetJob(jobId: string, request: Request, env: Env): Promise<
     createdAt: new Date(job.createdAt).toISOString(),
     updatedAt: new Date(job.updatedAt).toISOString(),
     expiresAt: new Date(job.expiresAt).toISOString(),
+    sourceBytes: job.sourceBytes,
+    resultBytes: job.resultBytes,
     crf: job.crf,
     preset: job.preset,
     error: job.error,
