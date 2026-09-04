@@ -1,0 +1,38 @@
+name = "ci-transcode"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "ci-transcode-store"
+
+[[durable_objects.bindings]]
+name = "JOB_REGISTRY"
+class_name = "JobRegistry"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["JobRegistry"]
+
+# ---- Secrets (set via `wrangler secret put <NAME>`, NOT here) ----
+# GITHUB_TOKEN         - GitHub PAT (repo scope) or GitHub App token, used to call
+#                        POST /repos/{owner}/{repo}/dispatches
+# GITHUB_OWNER         - github user/org that owns the CI repo
+# GITHUB_REPO          - github repo name containing .github/workflows/transcode.yml
+# INTERNAL_CALLBACK_SECRET - shared secret CI uses to authenticate callbacks to this Worker
+# R2_ACCOUNT_ID        - Cloudflare account id (for R2 S3-compatible endpoint)
+# R2_ACCESS_KEY_ID     - R2 API token access key id (for presigned URLs)
+# R2_SECRET_ACCESS_KEY - R2 API token secret (for presigned URLs)
+# R2_BUCKET_NAME       - bucket name (must match r2_buckets binding above)
+
+[vars]
+# Non-secret configuration, safe to keep in source control.
+DEFAULT_CRF = "40"
+DEFAULT_PRESET = "slow"
+MAX_PARALLEL_JOBS = "10"
+R2_QUOTA_BYTES = "5368709120"   # 5 GiB
+JOB_TTL_SECONDS = "86400"       # 1 day
+UPLOAD_URL_TTL_SECONDS = "3600" # 1 hour to upload source
+RESULT_URL_TTL_SECONDS = "3600" # 1 hour to download result once ready
+MAX_UPLOAD_BYTES = "2147483648" # 2 GiB per-file cap, tune as needed

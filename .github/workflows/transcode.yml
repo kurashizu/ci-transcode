@@ -1,0 +1,139 @@
+name: transcode
+
+on:
+  repository_dispatch:
+    types: [transcode]
+
+concurrency:
+  group: transcode-${{ github.event.client_payload.job_id }}
+  cancel-in-progress: false
+
+jobs:
+  transcode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      JOB_ID: ${{ github.event.client_payload.job_id }}
+      SOURCE_KEY: ${{ github.event.client_payload.source_key }}
+      RESULT_KEY: ${{ github.event.client_payload.result_key }}
+      CRF: ${{ github.event.client_payload.crf }}
+      PRESET: ${{ github.event.client_payload.preset }}
+      CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
+      INTERNAL_SECRET: ${{ secrets.INTERNAL_CALLBACK_SECRET }}
+      WORKER_BASE_URL: ${{ secrets.WORKER_BASE_URL }}
+      FFMPEG_VERSION: "7.0.2"
+    steps:
+      - name: Cache ffmpeg static binary
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/ffmpeg-bin
+          key: ffmpeg-static-${{ env.FFMPEG_VERSION }}-linux-x86_64
+
+      - name: Install ffmpeg (cache miss only)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p /home/runner/ffmpeg-bin
+          cd /tmp
+          curl -fsSL -o ffmpeg.tar.xz \
+            "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz"
+          tar xf ffmpeg.tar.xz
+          dir=$(find . -maxdepth 1 -type d -name 'ffmpeg-*-amd64-static')
+          cp "$dir/ffmpeg" "$dir/ffprobe" /home/runner/ffmpeg-bin/
+          chmod +x /home/runner/ffmpeg-bin/ffmpeg /home/runner/ffmpeg-bin/ffprobe
+
+      - name: Add ffmpeg to PATH
+        run: echo "/home/runner/ffmpeg-bin" >> "$GITHUB_PATH"
+
+      - name: Report downloading
+        run: |
+          curl -fsS -X POST "$CALLBACK_URL" \
+            -H "Authorization: Bearer $INTERNAL_SECRET" \
+            -H "content-type: application/json" \
+            -d "{\"jobId\":\"$JOB_ID\",\"status\":\"downloading\"}" >/dev/null
+
+      - name: Fetch presigned source URL
+        run: |
+          set -euo pipefail
+          resp=$(curl -fsS -X POST "$WORKER_BASE_URL/internal/source-url" \
+            -H "Authorization: Bearer $INTERNAL_SECRET" \
+            -H "content-type: application/json" \
+            -d "{\"sourceKey\":\"$SOURCE_KEY\"}")
+          url=$(printf '%s' "$resp" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
+          if [ -z "$url" ]; then echo "failed to obtain source url" >&2; exit 1; fi
+          printf '%s' "$url" > /tmp/source_url.txt
+
+      - name: Download source from R2
+        run: |
+          set -euo pipefail
+          curl -fsS -o /tmp/input.src "$(cat /tmp/source_url.txt)"
+          rm -f /tmp/source_url.txt
+
+      - name: Report transcoding
+        run: |
+          curl -fsS -X POST "$CALLBACK_URL" \
+            -H "Authorization: Bearer $INTERNAL_SECRET" \
+            -H "content-type: application/json" \
+            -d "{\"jobId\":\"$JOB_ID\",\"status\":\"transcoding\"}" >/dev/null
+
+      - name: Transcode to AV1 (libsvtav1)
+        run: |
+          set -euo pipefail
+          # No metadata is logged: stdout/stderr from ffmpeg (which can include source
+          # filenames/paths/stream metadata) is discarded, not persisted as an artifact,
+          # and never sent to the callback. Only the process exit code is inspected.
+          ffmpeg -y -hide_banner -loglevel error -nostats \
+            -i /tmp/input.src \
+            -map_metadata -1 -map_chapters -1 \
+            -c:v libsvtav1 -crf "$CRF" -preset "$PRESET" \
+            -c:a libopus -b:a 128k \
+            -f matroska /tmp/output.av1.mkv \
+            > /dev/null 2> /dev/null
+          rm -f /tmp/input.src
+
+      - name: Report uploading
+        run: |
+          curl -fsS -X POST "$CALLBACK_URL" \
+            -H "Authorization: Bearer $INTERNAL_SECRET" \
+            -H "content-type: application/json" \
+            -d "{\"jobId\":\"$JOB_ID\",\"status\":\"uploading\"}" >/dev/null
+
+      - name: Fetch presigned result URL
+        run: |
+          set -euo pipefail
+          resp=$(curl -fsS -X POST "$WORKER_BASE_URL/internal/result-url" \
+            -H "Authorization: Bearer $INTERNAL_SECRET" \
+            -H "content-type: application/json" \
+            -d "{\"resultKey\":\"$RESULT_KEY\"}")
+          url=$(printf '%s' "$resp" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
+          if [ -z "$url" ]; then echo "failed to obtain result url" >&2; exit 1; fi
+          printf '%s' "$url" > /tmp/result_url.txt
+
+      - name: Upload result to R2
+        run: |
+          set -euo pipefail
+          size=$(stat -c%s /tmp/output.av1.mkv)
+          curl -fsS -X PUT "$(cat /tmp/result_url.txt)" --data-binary @/tmp/output.av1.mkv
+          echo "RESULT_BYTES=$size" >> "$GITHUB_ENV"
+          rm -f /tmp/result_url.txt /tmp/output.av1.mkv
+
+      - name: Report done
+        if: success()
+        run: |
+          curl -fsS -X POST "$CALLBACK_URL" \
+            -H "Authorization: Bearer $INTERNAL_SECRET" \
+            -H "content-type: application/json" \
+            -d "{\"jobId\":\"$JOB_ID\",\"status\":\"done\",\"resultBytes\":$RESULT_BYTES}" >/dev/null
+
+      - name: Report failed
+        if: failure()
+        run: |
+          curl -fsS -X POST "$CALLBACK_URL" \
+            -H "Authorization: Bearer $INTERNAL_SECRET" \
+            -H "content-type: application/json" \
+            -d "{\"jobId\":\"$JOB_ID\",\"status\":\"failed\",\"error\":\"transcode pipeline failed\"}" >/dev/null || true
+
+      - name: Cleanup workspace
+        if: always()
+        run: rm -f /tmp/input.src /tmp/output.av1.mkv /tmp/source_url.txt /tmp/result_url.txt
