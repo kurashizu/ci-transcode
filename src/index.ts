@@ -131,23 +131,32 @@ async function handleCreateJob(request: Request, env: Env, ctx: ExecutionContext
 function fireDispatch(jobId: string, requestUrl: string, env: Env, ctx: ExecutionContext): void {
   ctx.waitUntil(
     (async () => {
-      const jobRes = await callDO(env, `/job/${jobId}`);
-      const jobData: any = await jobRes.json();
-      const job: JobRecord | undefined = jobData?.job;
-      if (!job) return;
-
       const callbackUrl = new URL(requestUrl);
       callbackUrl.pathname = "/internal/callback";
       callbackUrl.search = "";
 
       try {
+        const jobRes = await callDO(env, `/job/${jobId}`);
+        const jobData: any = await jobRes.json();
+        const job: JobRecord | undefined = jobData?.job;
+        // No record found for a job the DO just told us to dispatch shouldn't happen, but if it
+        // does, don't silently strand the slot -- surface it the same as any other dispatch
+        // failure so the job (if it still exists under a different read) gets marked failed and
+        // the sweep's stall-timeout reconciliation can eventually recover the slot regardless.
+        if (!job) throw new Error("job record not found immediately after promotion/commit");
+
         await dispatchTranscodeJob(env, job, callbackUrl.toString());
       } catch (err: any) {
+        // Every failure path here -- DO lookup, JSON parsing, or the dispatch call itself -- must
+        // still report "failed" back to the DO. Silently returning would leave the job stuck in
+        // "dispatching" forever with its concurrency slot never released (short of the 6h stall
+        // timeout). This callback call can itself fail (network blip, DO hiccup); that's fine --
+        // the stall timeout is the final backstop for that residual case.
         await callDO(env, "/callback", {
           jobId,
           status: "failed",
           error: `dispatch failed: ${err?.message ?? err}`,
-        });
+        }).catch(() => {});
       }
     })(),
   );
@@ -241,6 +250,11 @@ async function handleInternalSourceUrl(request: Request, env: Env): Promise<Resp
 
   const { sourceKey } = await request.json<{ sourceKey: string }>();
   if (!sourceKey) return errorResponse(400, "missing sourceKey");
+  // Even with a valid internal secret, only ever sign keys under the prefix this endpoint owns --
+  // caps the blast radius of a leaked secret to source objects, not the whole bucket.
+  if (!/^sources\/[a-f0-9]+\/[a-f0-9]+\.bin$/.test(sourceKey)) {
+    return errorResponse(400, "invalid sourceKey");
+  }
 
   const url = await presignGet(env, sourceKey, Number(env.UPLOAD_URL_TTL_SECONDS));
   return json({ url });
@@ -253,6 +267,9 @@ async function handleInternalResultUrl(request: Request, env: Env): Promise<Resp
 
   const { resultKey } = await request.json<{ resultKey: string }>();
   if (!resultKey) return errorResponse(400, "missing resultKey");
+  if (!/^results\/[a-f0-9]+\/[a-f0-9]+\.av1\.mp4$/.test(resultKey)) {
+    return errorResponse(400, "invalid resultKey");
+  }
 
   const url = await presignPut(env, resultKey, Number(env.UPLOAD_URL_TTL_SECONDS));
   return json({ url });

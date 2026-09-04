@@ -46,6 +46,7 @@ jobs:
           key: ffmpeg-static-${{ env.FFMPEG_VERSION }}-linux-x86_64
 
       - name: Install ffmpeg (cache miss only)
+        id: install-ffmpeg
         if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
@@ -63,6 +64,7 @@ jobs:
         run: echo "/home/runner/ffmpeg-bin" >> "$GITHUB_PATH"
 
       - name: Verify required codecs are present
+        id: verify-codecs
         run: |
           set -euo pipefail
           ffmpeg -hide_banner -encoders 2>/dev/null | grep -q ' libsvtav1 ' || {
@@ -75,20 +77,22 @@ jobs:
           callback.sh -X POST "$CALLBACK_URL" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
-            -d "{\"jobId\":\"$JOB_ID\",\"status\":\"downloading\"}" >/dev/null
+            -d "$(jq -nc --arg id "$JOB_ID" '{jobId:$id,status:"downloading"}')" >/dev/null
 
       - name: Fetch presigned source URL
+        id: source-url
         run: |
           set -euo pipefail
           resp=$(callback.sh -X POST "$WORKER_BASE_URL/internal/source-url" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
-            -d "{\"sourceKey\":\"$SOURCE_KEY\"}")
-          url=$(printf '%s' "$resp" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
+            -d "$(jq -nc --arg k "$SOURCE_KEY" '{sourceKey:$k}')")
+          url=$(printf '%s' "$resp" | jq -r '.url // empty')
           if [ -z "$url" ]; then echo "failed to obtain source url" >&2; exit 1; fi
           printf '%s' "$url" > /tmp/source_url.txt
 
       - name: Download source from R2
+        id: download-source
         run: |
           set -euo pipefail
           # Large-file transfer: no --max-time cap (would kill legitimate slow transfers), but
@@ -101,9 +105,10 @@ jobs:
           callback.sh -X POST "$CALLBACK_URL" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
-            -d "{\"jobId\":\"$JOB_ID\",\"status\":\"transcoding\"}" >/dev/null
+            -d "$(jq -nc --arg id "$JOB_ID" '{jobId:$id,status:"transcoding"}')" >/dev/null
 
       - name: Transcode to AV1 (libsvtav1)
+        id: transcode
         run: |
           set -euo pipefail
           # No metadata is logged: stdout/stderr from ffmpeg (which can include source
@@ -124,20 +129,22 @@ jobs:
           callback.sh -X POST "$CALLBACK_URL" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
-            -d "{\"jobId\":\"$JOB_ID\",\"status\":\"uploading\"}" >/dev/null
+            -d "$(jq -nc --arg id "$JOB_ID" '{jobId:$id,status:"uploading"}')" >/dev/null
 
       - name: Fetch presigned result URL
+        id: result-url
         run: |
           set -euo pipefail
           resp=$(callback.sh -X POST "$WORKER_BASE_URL/internal/result-url" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
-            -d "{\"resultKey\":\"$RESULT_KEY\"}")
-          url=$(printf '%s' "$resp" | grep -o '"url":"[^"]*"' | cut -d'"' -f4)
+            -d "$(jq -nc --arg k "$RESULT_KEY" '{resultKey:$k}')")
+          url=$(printf '%s' "$resp" | jq -r '.url // empty')
           if [ -z "$url" ]; then echo "failed to obtain result url" >&2; exit 1; fi
           printf '%s' "$url" > /tmp/result_url.txt
 
       - name: Upload result to R2
+        id: upload-result
         run: |
           set -euo pipefail
           size=$(stat -c%s /tmp/output.av1.mp4)
@@ -151,15 +158,36 @@ jobs:
           callback.sh -X POST "$CALLBACK_URL" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
-            -d "{\"jobId\":\"$JOB_ID\",\"status\":\"done\",\"resultBytes\":$RESULT_BYTES}" >/dev/null
+            -d "$(jq -nc --arg id "$JOB_ID" --argjson bytes "$RESULT_BYTES" \
+              '{jobId:$id,status:"done",resultBytes:$bytes}')" >/dev/null
 
       - name: Report failed
         if: failure()
         run: |
+          # Identify which step actually failed (step name only -- never any video content or
+          # filename) so the job's error field is useful for debugging instead of a generic
+          # message every time.
+          failed_step="unknown"
+          declare -A OUTCOMES=(
+            [install-ffmpeg]="${{ steps.install-ffmpeg.outcome }}"
+            [verify-codecs]="${{ steps.verify-codecs.outcome }}"
+            [source-url]="${{ steps.source-url.outcome }}"
+            [download-source]="${{ steps.download-source.outcome }}"
+            [transcode]="${{ steps.transcode.outcome }}"
+            [result-url]="${{ steps.result-url.outcome }}"
+            [upload-result]="${{ steps.upload-result.outcome }}"
+          )
+          for step in install-ffmpeg verify-codecs source-url download-source transcode result-url upload-result; do
+            if [ "${OUTCOMES[$step]}" = "failure" ]; then
+              failed_step="$step"
+              break
+            fi
+          done
           callback.sh -X POST "$CALLBACK_URL" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
-            -d "{\"jobId\":\"$JOB_ID\",\"status\":\"failed\",\"error\":\"transcode pipeline failed\"}" >/dev/null || true
+            -d "$(jq -nc --arg id "$JOB_ID" --arg step "$failed_step" \
+              '{jobId:$id,status:"failed",error:("pipeline failed at step: " + $step)}')" >/dev/null || true
 
       - name: Cleanup workspace
         if: always()

@@ -1,5 +1,5 @@
 import type { Env, JobRecord, JobStatus } from "../types";
-import { randomId, randomToken } from "../util";
+import { randomId, randomToken, safeEqual } from "../util";
 import { presignGet, presignPut } from "../r2sign";
 
 const JOB_PREFIX = "job:";
@@ -98,11 +98,6 @@ export class JobRegistry {
 
   private async getJob(jobId: string): Promise<JobRecord | null> {
     return (await this.state.storage.get<JobRecord>(JOB_PREFIX + jobId)) ?? null;
-  }
-
-  private async putJob(job: JobRecord): Promise<void> {
-    job.updatedAt = Date.now();
-    await this.state.storage.put(JOB_PREFIX + jobId(job), job);
   }
 
   // ---- handlers ----
@@ -214,7 +209,7 @@ export class JobRegistry {
     if (!jobId || !token) return respond({ error: "missing jobId or token" }, 400);
     const job = await this.getJob(jobId);
     if (!job) return respond({ error: "not found" }, 404);
-    if (job.token !== token) return respond({ error: "unauthorized" }, 403);
+    if (!safeEqual(job.token, token)) return respond({ error: "unauthorized" }, 403);
     if (job.expiresAt < Date.now()) return respond({ error: "job expired" }, 410);
     return job;
   }
@@ -380,7 +375,6 @@ export class JobRegistry {
       }
 
       if (job.expiresAt >= now) continue;
-      if (job.status === "expired") continue;
 
       if (job.sourceKey && (job.status === "awaiting_upload" || job.status === "queued")) {
         await this.env.BUCKET.delete(job.sourceKey).catch(() => {});
@@ -391,9 +385,11 @@ export class JobRegistry {
         freedBytes += job.resultBytes;
       }
 
-      job.status = "expired";
-      job.error = job.error ?? "expired (TTL reached)";
-      await this.putJobRaw(job);
+      // Delete the record outright rather than just flagging it "expired" -- otherwise DO
+      // storage grows without bound and every sweep/promoteNextQueued full-table scan gets
+      // slower forever. Past TTL, a job is gone: GET /jobs/{id} correctly 404s instead of
+      // returning a permanent "expired" tombstone.
+      await this.state.storage.delete(JOB_PREFIX + job.jobId);
       await this.removeLru(job.jobId);
       expiredCount++;
     }
@@ -435,10 +431,6 @@ export class JobRegistry {
       promotedJobIds,
     });
   }
-}
-
-function jobId(job: JobRecord): string {
-  return job.jobId;
 }
 
 function respond(data: unknown, status = 200): Response {

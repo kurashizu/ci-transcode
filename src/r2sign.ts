@@ -21,7 +21,12 @@ async function presign(
   expiresSeconds: number,
 ): Promise<string> {
   const aws = client(env);
-  const url = new URL(`${s3Endpoint(env)}/${env.R2_BUCKET_NAME}/${key}`);
+  // Encode each path segment individually (not the whole key) so literal "/" separators in a
+  // multi-segment key like "sources/<jobId>/<file>" survive, while every other character is
+  // safely escaped. Keys are always our own randomId()-generated hex today, but this must not
+  // silently rely on that.
+  const encodedKey = key.split("/").map(encodeURIComponent).join("/");
+  const url = new URL(`${s3Endpoint(env)}/${env.R2_BUCKET_NAME}/${encodedKey}`);
   url.searchParams.set("X-Amz-Expires", String(expiresSeconds));
   const signed = await aws.sign(
     new Request(url, { method }),
