@@ -26,6 +26,12 @@ Create a new job and request an upload URL.
 Out-of-range values are clamped, not rejected. The response's \`crf\`/\`preset\` fields report the
 values actually stored -- check them if you want to confirm what was accepted.
 
+> **Recommended: \`crf: 40, preset: 4\`** (the defaults). Benchmarking across the full CRF/preset
+> matrix on real footage showed preset has only a minor effect on output size at a given CRF, but
+> a large effect on encode time -- so preset 4 buys meaningfully better compression than the
+> fastest presets for a modest time cost, without paying the very large time penalty of preset
+> 0-2 for negligible extra size. CRF is what actually controls file size; tune it first.
+
 \`\`\`
 curl -X POST https://your-worker.example.workers.dev/jobs \\
   -H 'content-type: application/json' \\
