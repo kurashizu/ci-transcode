@@ -2,7 +2,7 @@ import type { Env, JobRecord } from "./types";
 import { json, errorResponse, bearerToken, safeEqual } from "./util";
 import { dispatchTranscodeJob } from "./github";
 import { presignGet, presignPut } from "./r2sign";
-import { API_DOCS_HTML } from "./docs";
+import { API_DOCS_MARKDOWN, renderDocsHtml } from "./docs";
 export { JobRegistry } from "./durable-objects/job-registry";
 
 function registryStub(env: Env): DurableObjectStub {
@@ -24,9 +24,25 @@ export default {
     const { pathname } = url;
 
     try {
+      if (pathname === "/docs.md") {
+        return new Response(API_DOCS_MARKDOWN, {
+          headers: { "content-type": "text/markdown; charset=utf-8" },
+        });
+      }
+
       if (pathname === "/" || pathname === "/docs") {
-        return new Response(API_DOCS_HTML, {
-          headers: { "content-type": "text/html; charset=utf-8" },
+        // Markdown by default -- this endpoint mainly serves curl/agents, which send
+        // Accept: */* rather than asking for HTML. Only requests that explicitly prefer
+        // text/html (i.e. browsers) get the rendered page.
+        const accept = request.headers.get("accept") ?? "";
+        const wantsHtml = accept.includes("text/html");
+        if (wantsHtml) {
+          return new Response(renderDocsHtml(), {
+            headers: { "content-type": "text/html; charset=utf-8" },
+          });
+        }
+        return new Response(API_DOCS_MARKDOWN, {
+          headers: { "content-type": "text/markdown; charset=utf-8" },
         });
       }
 
