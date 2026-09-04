@@ -20,7 +20,7 @@ jobs:
       PRESET: ${{ github.event.client_payload.preset }}
       CALLBACK_URL: ${{ github.event.client_payload.callback_url }}
       INTERNAL_SECRET: ${{ secrets.INTERNAL_CALLBACK_SECRET }}
-      WORKER_BASE_URL: ${{ secrets.WORKER_BASE_URL }}
+      WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
       FFMPEG_VERSION: "7.0.2"
     steps:
       - name: Cache ffmpeg static binary
