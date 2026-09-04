@@ -16,18 +16,18 @@ tag = "v1"
 new_sqlite_classes = ["JobRegistry"]
 
 # ---- Secrets (set via `wrangler secret put <NAME>`, NOT here) ----
-# GITHUB_TOKEN         - GitHub PAT (repo scope) or GitHub App token, used to call
-#                        POST /repos/{owner}/{repo}/dispatches
-# GITHUB_OWNER         - github user/org that owns the CI repo
-# GITHUB_REPO          - github repo name containing .github/workflows/transcode.yml
-# INTERNAL_CALLBACK_SECRET - shared secret CI uses to authenticate callbacks to this Worker
-# R2_ACCOUNT_ID        - Cloudflare account id (for R2 S3-compatible endpoint)
-# R2_ACCESS_KEY_ID     - R2 API token access key id (for presigned URLs)
-# R2_SECRET_ACCESS_KEY - R2 API token secret (for presigned URLs)
-# R2_BUCKET_NAME       - bucket name (must match r2_buckets binding above)
+# GITHUB_TOKEN              - GitHub PAT (Contents: Read & write on the CI repo), used to call
+#                              POST /repos/{owner}/{repo}/dispatches
+# INTERNAL_CALLBACK_SECRET  - shared secret CI uses to authenticate callbacks to this Worker
+# R2_ACCESS_KEY_ID          - R2 API token access key id (for presigned URLs)
+# R2_SECRET_ACCESS_KEY      - R2 API token secret (for presigned URLs)
 
 [vars]
 # Non-secret configuration, safe to keep in source control.
+GITHUB_OWNER = "kurashizu"
+GITHUB_REPO = "ci-transcode"
+R2_ACCOUNT_ID = "f1494473540307a5935f4a6a56c0d015"
+R2_BUCKET_NAME = "ci-transcode-store"
 DEFAULT_CRF = "40"
 DEFAULT_PRESET = "slow"
 MAX_PARALLEL_JOBS = "10"

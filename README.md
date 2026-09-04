@@ -55,18 +55,15 @@ Fine-grained PAT，仅需该仓库的 `Contents: Read and write` + `Metadata: Re
 
 ### 5. 配置 Worker Secrets
 
+只有真正敏感的凭证才作为 secret；GitHub owner/repo、R2 account id、桶名等不敏感的配置直接写在
+`wrangler.toml` 的 `[vars]` 里（随源码提交，按需自行修改）。
+
 ```bash
-wrangler secret put GITHUB_TOKEN            # 上一步的 PAT
-wrangler secret put GITHUB_OWNER            # 你的 GitHub 用户名/组织
-wrangler secret put GITHUB_REPO             # 本仓库名
+wrangler secret put GITHUB_TOKEN             # 步骤 4 的 PAT
 wrangler secret put INTERNAL_CALLBACK_SECRET # 与步骤 3 一致的随机字符串
-wrangler secret put R2_ACCOUNT_ID
 wrangler secret put R2_ACCESS_KEY_ID
 wrangler secret put R2_SECRET_ACCESS_KEY
-wrangler secret put R2_BUCKET_NAME          # ci-transcode-store
 ```
-
-`wrangler.toml` 中的 `[vars]`（CRF/preset 默认值、并发上限、配额、TTL）为非敏感配置，可直接改仓库里的值。
 
 ### 6. 部署
 

@@ -2,17 +2,17 @@ export interface Env {
   BUCKET: R2Bucket;
   JOB_REGISTRY: DurableObjectNamespace;
 
-  // secrets
+  // secrets (wrangler secret put) — only genuinely sensitive credentials
   GITHUB_TOKEN: string;
-  GITHUB_OWNER: string;
-  GITHUB_REPO: string;
   INTERNAL_CALLBACK_SECRET: string;
-  R2_ACCOUNT_ID: string;
   R2_ACCESS_KEY_ID: string;
   R2_SECRET_ACCESS_KEY: string;
-  R2_BUCKET_NAME: string;
 
-  // vars
+  // vars ([vars] in wrangler.toml) — non-sensitive configuration
+  GITHUB_OWNER: string;
+  GITHUB_REPO: string;
+  R2_ACCOUNT_ID: string;
+  R2_BUCKET_NAME: string;
   DEFAULT_CRF: string;
   DEFAULT_PRESET: string;
   MAX_PARALLEL_JOBS: string;
