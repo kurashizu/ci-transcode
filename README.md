@@ -2,7 +2,7 @@
 
 Asynchronous AV1 software transcoding service built on Cloudflare Workers + Durable Objects + R2 + GitHub Actions.
 
-- Transcode engine: ffmpeg (libsvtav1), configurable `crf` (default 40) and `preset` (default slow)
+- Transcode engine: ffmpeg (libsvtav1), configurable `crf` (default 40) and `preset` (0-13 numeric SVT-AV1 preset, default 4)
 - Concurrency: up to 10 parallel transcode jobs (atomically enforced by a Durable Object)
 - Storage: Cloudflare R2, 5GB quota, LRU eviction when full, 1-day TTL per job by default
 - Privacy-first: the R2 bucket is private (all access via presigned URLs), CI never logs or emits any video filename or metadata

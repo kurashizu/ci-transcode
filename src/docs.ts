@@ -45,11 +45,11 @@ Neither this service nor CI records or emits the original filename or any video 
 <table>
 <tr><th>Body (JSON, optional)</th><th>Description</th></tr>
 <tr><td><code>crf</code></td><td>Integer 0-63, default 40</td></tr>
-<tr><td><code>preset</code></td><td>ultrafast..veryslow, default slow</td></tr>
+<tr><td><code>preset</code></td><td>Integer 0-13 (SVT-AV1 numeric preset: 0 = slowest/best quality, 13 = fastest), default 4</td></tr>
 </table>
 <pre><code>curl -X POST https://your-worker.example.workers.dev/jobs \\
   -H 'content-type: application/json' \\
-  -d '{"crf": 32, "preset": "slow"}'</code></pre>
+  -d '{"crf": 32, "preset": 4}'</code></pre>
 <pre><code>{
   "jobId": "a1b2c3...",
   "token": "xxxxx...",
@@ -76,7 +76,7 @@ Neither this service nor CI records or emits the original filename or any video 
   "jobId": "a1b2c3...",
   "status": "transcoding",
   "createdAt": "...", "updatedAt": "...", "expiresAt": "...",
-  "crf": 32, "preset": "slow",
+  "crf": 32, "preset": 4,
   "error": null
 }</code></pre>
 

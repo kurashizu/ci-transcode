@@ -34,11 +34,11 @@ export type JobStatus =
   | "failed"
   | "expired";
 
-export const AV1_PRESETS = [
-  "ultrafast", "superfast", "veryfast", "faster", "fast",
-  "medium", "slow", "slower", "veryslow",
-] as const;
-export type Av1Preset = (typeof AV1_PRESETS)[number];
+// SVT-AV1's -preset is a numeric 0-13 knob (0 = slowest/best quality, 13 = fastest), unlike
+// x264's named presets. We expose that same numeric range directly through the API rather than
+// mapping to unrelated string names.
+export const MIN_PRESET = 0;
+export const MAX_PRESET = 13;
 
 export interface JobRecord {
   jobId: string;
@@ -54,7 +54,7 @@ export interface JobRecord {
   resultBytes: number | null;
 
   crf: number;
-  preset: Av1Preset;
+  preset: number;
 
   error: string | null;
   ciRunHint: string | null; // opaque dispatch correlation id, not a github run id
@@ -67,6 +67,6 @@ export interface PublicJobView {
   updatedAt: string;
   expiresAt: string;
   crf: number;
-  preset: Av1Preset;
+  preset: number;
   error: string | null;
 }

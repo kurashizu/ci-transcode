@@ -109,9 +109,9 @@ export class JobRegistry {
 
   /** Step 1: allocate a job, source/result keys, and a presigned PUT URL for the source upload. */
   private async handleCreate(request: Request): Promise<Response> {
-    const body = await request.json<{ crf?: number; preset?: string }>();
+    const body = await request.json<{ crf?: number; preset?: number }>();
     const crf = clampCrf(body.crf, Number(this.env.DEFAULT_CRF));
-    const preset = validPreset(body.preset, this.env.DEFAULT_PRESET);
+    const preset = clampPreset(body.preset, Number(this.env.DEFAULT_PRESET));
 
     const jobId = randomId(12);
     const token = randomToken();
@@ -130,7 +130,7 @@ export class JobRegistry {
       sourceBytes: null,
       resultBytes: null,
       crf,
-      preset: preset as any,
+      preset,
       error: null,
       ciRunHint: null,
     };
@@ -391,12 +391,8 @@ function clampCrf(input: unknown, fallback: number): number {
   return Math.min(63, Math.max(0, Math.round(n)));
 }
 
-const VALID_PRESETS = new Set([
-  "ultrafast", "superfast", "veryfast", "faster", "fast",
-  "medium", "slow", "slower", "veryslow",
-]);
-
-function validPreset(input: unknown, fallback: string): string {
-  if (typeof input === "string" && VALID_PRESETS.has(input)) return input;
-  return fallback;
+function clampPreset(input: unknown, fallback: number): number {
+  const n = typeof input === "number" ? input : fallback;
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(13, Math.max(0, Math.round(n)));
 }

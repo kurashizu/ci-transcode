@@ -29,7 +29,7 @@ fi
 echo "== 2. POST /jobs =="
 create_resp=$(curl -fsS -X POST "$BASE_URL/jobs" \
   -H 'content-type: application/json' \
-  -d '{"crf": 40, "preset": "veryfast"}')
+  -d '{"crf": 40, "preset": 10}')
 echo "$create_resp"
 
 job_id=$(printf '%s' "$create_resp" | grep -o '"jobId":"[^"]*"' | cut -d'"' -f4)
