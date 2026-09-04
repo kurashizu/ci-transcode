@@ -343,14 +343,35 @@ export class JobRegistry {
     return freed;
   }
 
-  /** Periodic sweep (invoked by the Worker's cron trigger): expire stale jobs past TTL, free R2. */
+  /** Periodic sweep (invoked by the Worker's cron trigger): expire stale jobs past TTL, free R2,
+   * and reclaim concurrency slots leaked by jobs whose CI callback was lost (GitHub/Worker outage,
+   * a runner that died without reaching its `if: failure()` step, etc). */
   private async handleSweep(): Promise<Response> {
     const now = Date.now();
     const all = await this.state.storage.list<JobRecord>({ prefix: JOB_PREFIX });
     let expiredCount = 0;
     let freedBytes = 0;
+    let reclaimedSlots = 0;
+
+    const stallTimeoutMs = Number(this.env.STALL_TIMEOUT_SECONDS) * 1000;
+    const activeCiStates: JobStatus[] = ["dispatching", "downloading", "transcoding", "uploading"];
 
     for (const job of all.values()) {
+      if (activeCiStates.includes(job.status) && now - job.updatedAt > stallTimeoutMs) {
+        job.status = "failed";
+        job.error = "stalled: no status update received for longer than STALL_TIMEOUT_SECONDS " +
+          "(likely a lost CI callback -- GitHub/network outage or a runner that died silently)";
+        await this.env.BUCKET.delete(job.sourceKey).catch(() => {});
+        if (job.sourceBytes) freedBytes += job.sourceBytes;
+        await this.putJobRaw(job);
+
+        const active = await this.getActiveCount();
+        await this.setActiveCount(Math.max(0, active - 1));
+        reclaimedSlots++;
+        await this.promoteNextQueued();
+        continue;
+      }
+
       if (job.expiresAt >= now) continue;
       if (job.status === "expired") continue;
 
@@ -372,7 +393,7 @@ export class JobRegistry {
 
     if (freedBytes > 0) await this.reserveQuota(-freedBytes);
 
-    return respond({ expiredCount, freedBytes });
+    return respond({ expiredCount, freedBytes, reclaimedSlots });
   }
 }
 

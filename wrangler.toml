@@ -33,6 +33,10 @@ DEFAULT_PRESET = "4" # SVT-AV1 numeric preset, 0 (slowest/best) - 13 (fastest); 
 MAX_PARALLEL_JOBS = "10"
 R2_QUOTA_BYTES = "5368709120"   # 5 GiB
 JOB_TTL_SECONDS = "86400"       # 1 day
+STALL_TIMEOUT_SECONDS = "21600" # 6h: if a job sits in an active CI stage (dispatching/downloading/
+                                 # transcoding/uploading) with no status update for this long, sweep
+                                 # treats it as a lost callback (e.g. GitHub/Worker outage) and marks
+                                 # it failed so its concurrency slot isn't leaked until TTL.
 UPLOAD_URL_TTL_SECONDS = "3600" # 1 hour to upload source
 RESULT_URL_TTL_SECONDS = "3600" # 1 hour to download result once ready
 MAX_UPLOAD_BYTES = "2147483648" # 2 GiB per-file cap, tune as needed

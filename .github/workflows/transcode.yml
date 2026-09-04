@@ -23,6 +23,21 @@ jobs:
       WORKER_BASE_URL: ${{ vars.WORKER_BASE_URL }}
       FFMPEG_VERSION: "master-latest"
     steps:
+      - name: Prepare callback helper
+        run: |
+          mkdir -p /home/runner/bin
+          cat > /home/runner/bin/callback.sh <<'SCRIPT'
+          #!/usr/bin/env bash
+          # Reports status to the Worker with a bounded connect/total timeout and a few retries.
+          # This must not hang indefinitely -- a Worker outage should fail fast (job goes "failed"
+          # and its concurrency slot is freed by TTL/callback-timeout rather than the CI runner
+          # spinning for hours) rather than tying up a GitHub Actions runner.
+          set -uo pipefail
+          curl -fsS --connect-timeout 10 --max-time 30 --retry 3 --retry-delay 2 --retry-connrefused "$@"
+          SCRIPT
+          chmod +x /home/runner/bin/callback.sh
+          echo "/home/runner/bin" >> "$GITHUB_PATH"
+
       - name: Cache ffmpeg static binary
         id: ffmpeg-cache
         uses: actions/cache@v4
@@ -37,7 +52,7 @@ jobs:
           mkdir -p /home/runner/ffmpeg-bin
           cd /tmp
           # GPL build with the full codec set (libsvtav1, libopus, etc.) statically linked in.
-          curl -fsSL -o ffmpeg.tar.xz \
+          curl -fsSL --connect-timeout 15 -o ffmpeg.tar.xz \
             "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-${FFMPEG_VERSION}-linux64-gpl.tar.xz"
           tar xf ffmpeg.tar.xz
           dir=$(find . -maxdepth 1 -type d -name 'ffmpeg-*-linux64-gpl')
@@ -57,7 +72,7 @@ jobs:
 
       - name: Report downloading
         run: |
-          curl -fsS -X POST "$CALLBACK_URL" \
+          callback.sh -X POST "$CALLBACK_URL" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
             -d "{\"jobId\":\"$JOB_ID\",\"status\":\"downloading\"}" >/dev/null
@@ -65,7 +80,7 @@ jobs:
       - name: Fetch presigned source URL
         run: |
           set -euo pipefail
-          resp=$(curl -fsS -X POST "$WORKER_BASE_URL/internal/source-url" \
+          resp=$(callback.sh -X POST "$WORKER_BASE_URL/internal/source-url" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
             -d "{\"sourceKey\":\"$SOURCE_KEY\"}")
@@ -76,12 +91,14 @@ jobs:
       - name: Download source from R2
         run: |
           set -euo pipefail
-          curl -fsS -o /tmp/input.src "$(cat /tmp/source_url.txt)"
+          # Large-file transfer: no --max-time cap (would kill legitimate slow transfers), but
+          # keep a connect timeout so a genuinely unreachable R2 endpoint fails fast.
+          curl -fsS --connect-timeout 15 -o /tmp/input.src "$(cat /tmp/source_url.txt)"
           rm -f /tmp/source_url.txt
 
       - name: Report transcoding
         run: |
-          curl -fsS -X POST "$CALLBACK_URL" \
+          callback.sh -X POST "$CALLBACK_URL" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
             -d "{\"jobId\":\"$JOB_ID\",\"status\":\"transcoding\"}" >/dev/null
@@ -103,7 +120,7 @@ jobs:
 
       - name: Report uploading
         run: |
-          curl -fsS -X POST "$CALLBACK_URL" \
+          callback.sh -X POST "$CALLBACK_URL" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
             -d "{\"jobId\":\"$JOB_ID\",\"status\":\"uploading\"}" >/dev/null
@@ -111,7 +128,7 @@ jobs:
       - name: Fetch presigned result URL
         run: |
           set -euo pipefail
-          resp=$(curl -fsS -X POST "$WORKER_BASE_URL/internal/result-url" \
+          resp=$(callback.sh -X POST "$WORKER_BASE_URL/internal/result-url" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
             -d "{\"resultKey\":\"$RESULT_KEY\"}")
@@ -123,14 +140,14 @@ jobs:
         run: |
           set -euo pipefail
           size=$(stat -c%s /tmp/output.av1.mkv)
-          curl -fsS -X PUT "$(cat /tmp/result_url.txt)" --data-binary @/tmp/output.av1.mkv
+          curl -fsS --connect-timeout 15 -X PUT "$(cat /tmp/result_url.txt)" --data-binary @/tmp/output.av1.mkv
           echo "RESULT_BYTES=$size" >> "$GITHUB_ENV"
           rm -f /tmp/result_url.txt /tmp/output.av1.mkv
 
       - name: Report done
         if: success()
         run: |
-          curl -fsS -X POST "$CALLBACK_URL" \
+          callback.sh -X POST "$CALLBACK_URL" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
             -d "{\"jobId\":\"$JOB_ID\",\"status\":\"done\",\"resultBytes\":$RESULT_BYTES}" >/dev/null
@@ -138,7 +155,7 @@ jobs:
       - name: Report failed
         if: failure()
         run: |
-          curl -fsS -X POST "$CALLBACK_URL" \
+          callback.sh -X POST "$CALLBACK_URL" \
             -H "Authorization: Bearer $INTERNAL_SECRET" \
             -H "content-type: application/json" \
             -d "{\"jobId\":\"$JOB_ID\",\"status\":\"failed\",\"error\":\"transcode pipeline failed\"}" >/dev/null || true

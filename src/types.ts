@@ -18,6 +18,7 @@ export interface Env {
   MAX_PARALLEL_JOBS: string;
   R2_QUOTA_BYTES: string;
   JOB_TTL_SECONDS: string;
+  STALL_TIMEOUT_SECONDS: string;
   UPLOAD_URL_TTL_SECONDS: string;
   RESULT_URL_TTL_SECONDS: string;
   MAX_UPLOAD_BYTES: string;
